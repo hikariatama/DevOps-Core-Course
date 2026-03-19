@@ -1,0 +1,212 @@
+version: "3.8"
+
+services:
+  prometheus:
+    image: prom/prometheus:v{{ prometheus_version }}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time={{ prometheus_retention_days }}d
+      - --storage.tsdb.retention.size={{ prometheus_retention_size }}
+    ports:
+      - "{{ prometheus_port }}:{{ prometheus_port }}"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - {{ monitoring_network_name }}
+    labels:
+      logging: "promtail"
+      app: "prometheus"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:{{ prometheus_port }}/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  loki:
+    image: grafana/loki:{{ loki_version }}
+    command: -config.file=/etc/loki/config.yml
+    ports:
+      - "{{ loki_port }}:{{ loki_port }}"
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
+    networks:
+      - {{ monitoring_network_name }}
+    labels:
+      logging: "promtail"
+      app: "loki"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:{{ loki_port }}/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  promtail:
+    image: grafana/promtail:{{ promtail_version }}
+    command: -config.file=/etc/promtail/config.yml
+    ports:
+      - "{{ promtail_port }}:{{ promtail_port }}"
+    volumes:
+      - ./promtail/config.yml:/etc/promtail/config.yml:ro
+      - promtail-data:/var/lib/promtail
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+    networks:
+      - {{ monitoring_network_name }}
+    labels:
+      logging: "promtail"
+      app: "promtail"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/{{ promtail_port }} && printf \"GET /ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && grep -q \"Ready\" <&3'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  grafana:
+    image: grafana/grafana:{{ grafana_version }}
+    ports:
+      - "{{ grafana_host_port }}:{{ grafana_port }}"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_SECURITY_ADMIN_USER: "{{ monitoring_grafana_admin_user }}"
+      GF_SECURITY_ADMIN_PASSWORD: "{{ monitoring_grafana_admin_password }}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_METRICS_ENABLED: "true"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    networks:
+      - {{ monitoring_network_name }}
+    labels:
+      logging: "promtail"
+      app: "grafana"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:{{ grafana_port }}/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+  app-python:
+    image: {{ monitoring_python_image }}
+    pull_policy: always
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "{{ monitoring_python_port }}"
+      DEBUG: "false"
+    ports:
+      - "{{ monitoring_python_port }}:{{ monitoring_python_port }}"
+    networks:
+      - {{ monitoring_network_name }}
+    labels:
+      logging: "promtail"
+      app: "devops-python"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:{{ monitoring_python_port }}/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+{% if monitoring_enable_rust_app %}
+  app-rust:
+    image: {{ monitoring_rust_image }}
+    pull_policy: always
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "{{ monitoring_rust_port }}"
+      RUST_LOG: "info"
+    ports:
+      - "{{ monitoring_rust_port }}:{{ monitoring_rust_port }}"
+    networks:
+      - {{ monitoring_network_name }}
+    labels:
+      logging: "promtail"
+      app: "devops-rust"
+    healthcheck:
+      test: ["CMD", "/app/devops-info-service", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+{% endif %}
+
+volumes:
+  prometheus-data:
+  loki-data:
+  promtail-data:
+  grafana-data:
+
+networks:
+  {{ monitoring_network_name }}:
