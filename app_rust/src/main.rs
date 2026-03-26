@@ -1,9 +1,11 @@
-use actix_web::{web, App, HttpRequest, HttpServer, Responder, Result};
+use actix_web::{middleware, web, App, HttpRequest, HttpServer, Responder, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::SystemTime;
-use chrono::{DateTime, Utc};
 use sysinfo::System;
 
 #[derive(Serialize, Deserialize)]
@@ -75,7 +77,7 @@ fn get_uptime(start_time: SystemTime) -> (u64, String) {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
 
-    let human = format!("{} hours, {} minutes", hours, minutes);
+    let human = format!("{hours} hours, {minutes} minutes");
     (seconds, human)
 }
 
@@ -118,7 +120,8 @@ fn get_runtime_info(start_time: SystemTime) -> RuntimeInfo {
 
 fn get_request_info(req: &HttpRequest) -> RequestInfo {
     let connection_info = req.connection_info();
-    let client_ip = connection_info.realip_remote_addr()
+    let client_ip = connection_info
+        .realip_remote_addr()
         .unwrap_or("unknown")
         .to_string();
 
@@ -152,6 +155,20 @@ fn get_endpoints() -> Vec<EndpointInfo> {
     ]
 }
 
+fn run_healthcheck(port: &str) -> std::io::Result<()> {
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))?;
+    stream.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+
+    if response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200") {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("healthcheck failed"))
+    }
+}
+
 async fn index(data: web::Data<Arc<AppState>>, req: HttpRequest) -> Result<impl Responder> {
     let response = MainResponse {
         service: get_service_info(),
@@ -183,7 +200,12 @@ async fn main() -> std::io::Result<()> {
 
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let bind_addr = format!("{}:{}", host, port);
+
+    if env::args().any(|arg| arg == "--healthcheck") {
+        return run_healthcheck(&port);
+    }
+
+    let bind_addr = format!("{host}:{port}");
 
     let app_state = Arc::new(AppState {
         start_time: SystemTime::now(),
@@ -191,10 +213,13 @@ async fn main() -> std::io::Result<()> {
 
     log::info!("Application starting...");
     log::info!("Service: devops-info-service v1.0.0");
-    log::info!("Listening on {}", bind_addr);
+    log::info!("Listening on {bind_addr}");
 
     HttpServer::new(move || {
         App::new()
+            .wrap(middleware::Logger::new(
+                r#"%a "%r" %s %b "%{User-Agent}i" %T"#,
+            ))
             .app_data(web::Data::new(app_state.clone()))
             .route("/", web::get().to(index))
             .route("/health", web::get().to(health))
