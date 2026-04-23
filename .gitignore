@@ -1,1 +1,11 @@
 test
+local_vm/qemu/.artifacts/
+*.retry
+.vault_pass
+ansible/inventory/*.pyc
+__pycache__/
+.venv-lab5/
+monitoring/.env
+.DS_Store
+k8s/*.tgz
+k8s/*.prov
