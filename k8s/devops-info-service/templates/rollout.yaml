@@ -1,0 +1,111 @@
+{{- if and .Values.rollout.enabled (not .Values.statefulset.enabled) }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ include "common-lib.fullname" . }}
+  labels:
+    {{- include "common-lib.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  selector:
+    matchLabels:
+      {{- include "common-lib.selectorLabels" . | nindent 6 }}
+  strategy:
+    {{- if eq .Values.rollout.strategy "blueGreen" }}
+    blueGreen:
+      activeService: {{ include "common-lib.fullname" . }}
+      previewService: {{ include "common-lib.fullname" . }}-preview
+      autoPromotionEnabled: {{ .Values.rollout.blueGreen.autoPromotionEnabled }}
+      {{- if .Values.rollout.blueGreen.autoPromotionSeconds }}
+      autoPromotionSeconds: {{ .Values.rollout.blueGreen.autoPromotionSeconds }}
+      {{- end }}
+      {{- if .Values.rollout.blueGreen.scaleDownDelaySeconds }}
+      scaleDownDelaySeconds: {{ .Values.rollout.blueGreen.scaleDownDelaySeconds }}
+      {{- end }}
+    {{- else }}
+    canary:
+      steps:
+        - setWeight: 20
+        - pause: {}
+        {{- if .Values.rollout.canary.analysis.enabled }}
+        - analysis:
+            templates:
+              - templateName: {{ include "common-lib.fullname" . }}-health-check
+        {{- end }}
+        - setWeight: 40
+        - pause:
+            duration: {{ .Values.rollout.canary.pauseDuration }}
+        - setWeight: 60
+        - pause:
+            duration: {{ .Values.rollout.canary.pauseDuration }}
+        - setWeight: 80
+        - pause:
+            duration: {{ .Values.rollout.canary.pauseDuration }}
+        - setWeight: 100
+      {{- if .Values.rollout.canary.maxSurge }}
+      maxSurge: {{ .Values.rollout.canary.maxSurge }}
+      {{- end }}
+      {{- if hasKey .Values.rollout.canary "maxUnavailable" }}
+      maxUnavailable: {{ .Values.rollout.canary.maxUnavailable }}
+      {{- end }}
+    {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "common-lib.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      annotations:
+        checksum/config-file: {{ include "devops-info-service.renderedConfigFile" . | sha256sum }}
+        checksum/config-env: {{ include "devops-info-service.envConfigData" . | sha256sum }}
+        {{- $vaultAnnotations := include "devops-info-service.vaultAnnotations" . }}
+        {{- if $vaultAnnotations }}
+        {{- $vaultAnnotations | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "devops-info-service.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "devops-info-service.envConfigMapName" . }}
+            - secretRef:
+                name: {{ include "devops-info-service.secretName" . }}
+          env:
+            {{- include "devops-info-service.envVars" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.containerPort }}
+          startupProbe:
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config-volume
+              mountPath: {{ .Values.config.mountPath }}
+              readOnly: true
+            - name: data-volume
+              mountPath: {{ .Values.persistence.mountPath }}
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ include "devops-info-service.configFileConfigMapName" . }}
+        - name: data-volume
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "devops-info-service.persistenceClaimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}
